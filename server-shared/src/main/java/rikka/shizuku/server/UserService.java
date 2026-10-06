@@ -5,6 +5,7 @@ import android.app.Application;
 import android.app.Instrumentation;
 import android.content.Context;
 import android.content.ContextHidden;
+import android.content.pm.ApplicationInfo;
 import android.ddm.DdmHandleAppName;
 import android.os.Build;
 import android.os.IBinder;
@@ -72,6 +73,39 @@ public class UserService {
             Field mPackageInfo = context.getClass().getDeclaredField("mPackageInfo");
             mPackageInfo.setAccessible(true);
             Object loadedApk = mPackageInfo.get(context);
+
+            // Some OEM ROMs (MediaTek, Xiaomi, Transsion) patch LoadedApk.makeApplicationInner()
+            // to call Application.getProcessName().equals(mPackageName). Application.getProcessName()
+            // reads ActivityThread.currentProcessName(), which is
+            //   (am != null && am.mBoundApplication != null) ? am.mBoundApplication.processName : null
+            // This helper process is started by app_process and never calls bindApplication(), so
+            // mBoundApplication is null, getProcessName() returns null, and that equals() throws a
+            // NullPointerException. Populate mBoundApplication before makeApplication() runs.
+            try {
+                Class<?> appBindDataClass = Class.forName("android.app.ActivityThread$AppBindData");
+
+                Constructor<?> appBindDataConstructor = appBindDataClass.getDeclaredConstructor();
+                appBindDataConstructor.setAccessible(true);
+                Object appBindData = appBindDataConstructor.newInstance();
+
+                Field processNameField = appBindDataClass.getDeclaredField("processName");
+                processNameField.setAccessible(true);
+                processNameField.set(appBindData, name != null ? name : pkg + ":user_service");
+
+                // ActivityThread.currentPackageName() reads mBoundApplication.appInfo.packageName, so
+                // appInfo must not be null either, otherwise this only relocates the NPE. An empty
+                // ApplicationInfo keeps currentPackageName() returning null exactly as it did before,
+                // when mBoundApplication itself was null.
+                Field appInfoField = appBindDataClass.getDeclaredField("appInfo");
+                appInfoField.setAccessible(true);
+                appInfoField.set(appBindData, new ApplicationInfo());
+
+                Field boundApplication = ActivityThread.class.getDeclaredField("mBoundApplication");
+                boundApplication.setAccessible(true);
+                boundApplication.set(activityThread, appBindData);
+            } catch (Throwable ignored) {
+            }
+
             Method makeApplication = loadedApk.getClass().getDeclaredMethod("makeApplication", boolean.class, Instrumentation.class);
             Application application = (Application) makeApplication.invoke(loadedApk, true, null);
             Field mInitialApplication = activityThread.getClass().getDeclaredField("mInitialApplication");
